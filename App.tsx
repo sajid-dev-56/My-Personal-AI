@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { Mic, Send, Terminal, Cpu, Wifi, Activity, Power, Shield, Camera, Video, VideoOff, PhoneOff } from 'lucide-react';
+import { Mic, Send, Terminal, Cpu, Wifi, Activity, Power, Shield, Video, PhoneOff, Scan, Target } from 'lucide-react';
 import { JARVIS_SYSTEM_INSTRUCTION } from './constants';
 import { Message, SystemState } from './types';
 import Visualizer from './components/Visualizer';
@@ -12,13 +12,13 @@ import { createPcmBlob, decodeAudioData, base64ToUint8Array } from './services/a
 const App: React.FC = () => {
   // State
   const [messages, setMessages] = useState<Message[]>([
-    { role: 'model', content: "J.A.R.V.I.S. Online. Awaiting your command, Sir.", timestamp: new Date() }
+    { role: 'model', content: "J.A.R.V.I.S. Online. Systems nominal. Ready for input, Sir.", timestamp: new Date() }
   ]);
   const [inputText, setInputText] = useState('');
   const [systemState, setSystemState] = useState<SystemState>(SystemState.IDLE);
   const [isLiveMode, setIsLiveMode] = useState(false);
   const [isVideoMode, setIsVideoMode] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isScanning, setIsScanning] = useState(false);
 
   // Refs for Chat
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -37,9 +37,6 @@ const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoIntervalRef = useRef<number | null>(null);
 
-  // Initialize GenAI
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
   // Scroll to bottom of chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -55,6 +52,8 @@ const App: React.FC = () => {
     setSystemState(SystemState.PROCESSING);
 
     try {
+      // Re-init client for text requests to ensure freshness
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: [
@@ -90,17 +89,23 @@ const App: React.FC = () => {
     const ctx = canvas.getContext('2d');
     
     if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
-        canvas.width = video.videoWidth / 4; // Downscale for performance
-        canvas.height = video.videoHeight / 4;
+        // Downscale for performance/bandwidth (approx 320x240 usually sufficient for object detection)
+        canvas.width = video.videoWidth / 3; 
+        canvas.height = video.videoHeight / 3;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
-        const base64 = canvas.toDataURL('image/jpeg', 0.5).split(',')[1];
-        session.sendRealtimeInput({
-            media: {
-                mimeType: 'image/jpeg',
-                data: base64
-            }
-        });
+        const base64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+        
+        try {
+            session.sendRealtimeInput({
+                media: {
+                    mimeType: 'image/jpeg',
+                    data: base64
+                }
+            });
+        } catch (e) {
+            console.error("Frame send error", e);
+        }
     }
   };
 
@@ -108,7 +113,7 @@ const App: React.FC = () => {
   const startLiveSession = async (enableVideo: boolean) => {
     try {
       // Clean up any existing session first
-      stopLiveSession();
+      await stopLiveSession();
       
       setSystemState(SystemState.INITIALIZING);
       setIsVideoMode(enableVideo);
@@ -121,10 +126,10 @@ const App: React.FC = () => {
       audioContextRef.current = inputCtx;
       outputContextRef.current = outputCtx;
 
-      // 2. Get Media Stream (Audio + optional Video)
+      // 2. Get Media Stream
       const stream = await navigator.mediaDevices.getUserMedia({ 
           audio: true,
-          video: enableVideo ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } : false
+          video: enableVideo ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'environment' } : false
       });
       streamRef.current = stream;
 
@@ -135,6 +140,9 @@ const App: React.FC = () => {
       }
 
       // 4. Connect to Gemini Live
+      // IMPORTANT: Create new instance here to avoid stale state/Network Errors
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         callbacks: {
@@ -163,9 +171,10 @@ const App: React.FC = () => {
 
             // Start Video Loop if enabled
             if (enableVideo) {
+                // 5 FPS (200ms) is safer for network stability than 10 FPS
                 videoIntervalRef.current = window.setInterval(() => {
                     sessionPromise.then(session => captureAndSendFrame(session));
-                }, 100); // 10 FPS
+                }, 200); 
             }
           },
           onmessage: async (msg: LiveServerMessage) => {
@@ -191,9 +200,12 @@ const App: React.FC = () => {
                 nextStartTimeRef.current += audioBuffer.duration;
                 
                 source.onended = () => {
-                    if (outputCtx.currentTime >= nextStartTimeRef.current) {
-                         setSystemState(SystemState.LISTENING);
-                    }
+                    // Slight delay to prevent flickering state
+                    setTimeout(() => {
+                         if (outputCtx.currentTime >= nextStartTimeRef.current) {
+                            setSystemState(SystemState.LISTENING);
+                         }
+                    }, 100);
                 };
              }
              if (msg.serverContent?.turnComplete) {
@@ -202,11 +214,13 @@ const App: React.FC = () => {
           },
           onclose: () => {
             console.log('JARVIS Uplink Severed');
+            setSystemState(SystemState.IDLE);
             stopLiveSession();
           },
           onerror: (err) => {
             console.error('JARVIS System Error', err);
-            stopLiveSession();
+            setSystemState(SystemState.IDLE);
+            // Don't auto-stop here to allow transient errors, but log it.
           }
         },
         config: {
@@ -224,11 +238,12 @@ const App: React.FC = () => {
     } catch (e) {
       console.error("Initialization Failed", e);
       setSystemState(SystemState.IDLE);
-      alert("System Access Denied: Check Microphone/Camera Permissions.");
+      alert("Error: Unable to establish uplink. Check network and permissions.");
+      stopLiveSession();
     }
   };
 
-  const stopLiveSession = () => {
+  const stopLiveSession = async () => {
     // Clear video interval
     if (videoIntervalRef.current) {
         clearInterval(videoIntervalRef.current);
@@ -251,18 +266,28 @@ const App: React.FC = () => {
         inputSourceRef.current = null;
     }
     if (audioContextRef.current) {
-        audioContextRef.current.close();
+        if (audioContextRef.current.state !== 'closed') {
+           await audioContextRef.current.close();
+        }
         audioContextRef.current = null;
     }
     if (outputContextRef.current) {
-        outputContextRef.current.close();
+        if (outputContextRef.current.state !== 'closed') {
+           await outputContextRef.current.close();
+        }
         outputContextRef.current = null;
     }
 
     setIsLiveMode(false);
     setIsVideoMode(false);
+    setIsScanning(false);
     setSystemState(SystemState.IDLE);
     liveSessionRef.current = null;
+  };
+
+  const toggleScan = () => {
+      setIsScanning(!isScanning);
+      // Optional: trigger a specific prompt to the model via data channel or just let the system instruction handle it
   };
 
   return (
@@ -315,7 +340,7 @@ const App: React.FC = () => {
                </>
              ) : (
                 <button 
-                   onClick={stopLiveSession}
+                   onClick={() => stopLiveSession()}
                    className="flex items-center gap-2 px-4 py-2 rounded border border-red-500 text-red-400 hover:bg-red-500/20 shadow-[0_0_10px_rgba(239,68,68,0.4)] font-mono text-sm transition-all animate-pulse"
                  >
                    <Power size={16} /> TERMINATE
@@ -336,7 +361,7 @@ const App: React.FC = () => {
                  {isVideoMode ? (
                     <div className="relative w-full h-full flex items-center justify-center p-4">
                        {/* Video HUD Container */}
-                       <div className="relative border-2 border-cyan-500/50 rounded-lg overflow-hidden shadow-[0_0_50px_rgba(6,182,212,0.3)] bg-black/50 backdrop-blur-sm max-w-4xl w-full aspect-video">
+                       <div className={`relative border-2 ${isScanning ? 'border-red-400 shadow-[0_0_50px_rgba(248,113,113,0.4)]' : 'border-cyan-500/50 shadow-[0_0_50px_rgba(6,182,212,0.3)]'} rounded-lg overflow-hidden bg-black/50 backdrop-blur-sm max-w-5xl w-full aspect-video transition-all duration-500`}>
                           <video 
                              ref={videoRef} 
                              className="w-full h-full object-cover transform scale-x-[-1]" 
@@ -351,16 +376,41 @@ const App: React.FC = () => {
                              <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
                              REC ● LIVE FEED
                           </div>
-                          <div className="absolute bottom-4 right-4 text-cyan-400 font-mono text-xs">
-                             TARGET: USER_ALPHA
-                             <br/>
-                             BIO-METRICS: STABLE
+                          
+                          <div className="absolute bottom-4 left-4 text-cyan-400 font-mono text-xs space-y-1">
+                             <div>FPS: {isScanning ? "PROCESSING..." : "30"}</div>
+                             <div>ISO: AUTO</div>
+                             <div>ZOOM: 1.0x</div>
                           </div>
+
+                          <div className="absolute bottom-4 right-4 text-cyan-400 font-mono text-xs text-right">
+                             {isScanning ? (
+                                <div className="text-red-400 animate-pulse">
+                                  ANALYZING OBJECT PROTOCOL...<br/>
+                                  IDENTIFYING MODEL...
+                                </div>
+                             ) : (
+                                <div>
+                                  TARGET: SCANNING...<br/>
+                                  BIO-METRICS: STABLE
+                                </div>
+                             )}
+                          </div>
+
+                          {/* Center Reticle / Scanning Overlay */}
+                          {isScanning && (
+                              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 border border-red-400/50 rounded-lg flex items-center justify-center pointer-events-none">
+                                  <div className="absolute w-full h-0.5 bg-red-400/50 animate-scanline"></div>
+                                  <div className="w-56 h-56 border-2 border-dashed border-red-500/30 rounded-lg animate-spin-slow"></div>
+                                  <Target className="text-red-400 w-8 h-8 opacity-80" />
+                              </div>
+                          )}
+
                           {/* Corner Markers */}
-                          <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-cyan-400"></div>
-                          <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-cyan-400"></div>
-                          <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-cyan-400"></div>
-                          <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-cyan-400"></div>
+                          <div className={`absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 ${isScanning ? 'border-red-500' : 'border-cyan-400'} transition-colors`}></div>
+                          <div className={`absolute top-0 right-0 w-12 h-12 border-t-2 border-r-2 ${isScanning ? 'border-red-500' : 'border-cyan-400'} transition-colors`}></div>
+                          <div className={`absolute bottom-0 left-0 w-12 h-12 border-b-2 border-l-2 ${isScanning ? 'border-red-500' : 'border-cyan-400'} transition-colors`}></div>
+                          <div className={`absolute bottom-0 right-0 w-12 h-12 border-b-2 border-r-2 ${isScanning ? 'border-red-500' : 'border-cyan-400'} transition-colors`}></div>
                        </div>
                     </div>
                  ) : (
@@ -368,7 +418,7 @@ const App: React.FC = () => {
                  )}
             </div>
 
-            {/* Chat Messages Area - Auto scrollable */}
+            {/* Chat Messages Area */}
             <div className={`flex-1 overflow-y-auto p-6 space-y-6 z-10 transition-all duration-500 ${isLiveMode && isVideoMode ? 'hidden' : isLiveMode ? 'blur-sm opacity-50' : 'opacity-100'}`}>
                 {messages.map((msg, idx) => (
                   <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -380,7 +430,7 @@ const App: React.FC = () => {
                     `}>
                         <div className="flex items-center gap-2 mb-2 border-b border-cyan-500/20 pb-1">
                             <span className="text-[10px] font-mono opacity-60 uppercase tracking-widest">
-                                {msg.role === 'user' ? 'COMMANDER' : 'SYSTEM'}
+                                {msg.role === 'user' ? 'COMMANDER' : 'JARVIS'}
                             </span>
                             <span className="text-[10px] font-mono opacity-40">
                                 {msg.timestamp.toLocaleTimeString([], {hour12: false})}
@@ -406,7 +456,7 @@ const App: React.FC = () => {
                 <div ref={chatEndRef} className="h-4" />
             </div>
 
-            {/* Input Area (Disabled in Live Mode) */}
+            {/* Input Area */}
             <div className={`p-4 bg-slate-950/80 border-t border-cyan-900/50 backdrop-blur-md shrink-0 z-20 ${isVideoMode ? 'hidden' : ''}`}>
                <div className="max-w-4xl mx-auto flex gap-4 items-end relative">
                   <div className="absolute -top-1 -left-1 w-3 h-3 border-t border-l border-cyan-500"></div>
@@ -437,14 +487,14 @@ const App: React.FC = () => {
             </div>
         </div>
 
-        {/* Right Sidebar: System Logs (Hidden on mobile) */}
+        {/* Right Sidebar: System Logs */}
         <div className="hidden lg:block w-72 h-full border-l border-cyan-900/30">
             <SystemLog />
         </div>
 
       </main>
 
-      {/* Decorative Background Elements */}
+      {/* Decorative Background */}
       <div className="absolute inset-0 pointer-events-none z-0">
          <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-cyan-500/5 rounded-full blur-3xl"></div>
          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-600/5 rounded-full blur-3xl"></div>
@@ -467,12 +517,24 @@ const App: React.FC = () => {
 
       {/* Video Call Controls Overlay */}
       {isLiveMode && isVideoMode && (
-          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-4 z-50 bg-slate-900/80 p-3 rounded-full border border-cyan-500/30 backdrop-blur-md">
-             <button onClick={() => stopLiveSession()} className="p-3 rounded-full bg-red-500/20 text-red-400 border border-red-500 hover:bg-red-500 hover:text-white transition-all">
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-4 z-50 bg-slate-900/90 p-3 px-6 rounded-full border border-cyan-500/30 backdrop-blur-md shadow-[0_0_20px_rgba(0,0,0,0.5)]">
+             <button 
+                onClick={toggleScan}
+                className={`p-3 rounded-full border transition-all ${isScanning ? 'bg-red-500 text-white border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.5)]' : 'bg-cyan-500/10 text-cyan-400 border-cyan-500/50 hover:bg-cyan-500/30'}`}
+                title="Identify Object"
+             >
+                <Scan size={24} className={isScanning ? "animate-spin-slow" : ""} />
+             </button>
+             
+             <div className="h-6 w-px bg-cyan-500/30 mx-2"></div>
+
+             <button onClick={() => stopLiveSession()} className="p-3 rounded-full bg-red-500/20 text-red-400 border border-red-500 hover:bg-red-500 hover:text-white transition-all shadow-[0_0_15px_rgba(239,68,68,0.3)]">
                 <PhoneOff size={24} />
              </button>
-             <div className="h-6 w-px bg-cyan-500/30 mx-2"></div>
-             <div className="text-xs font-mono text-cyan-400 animate-pulse px-2">LIVE FEED ACTIVE</div>
+             
+             <div className="absolute -top-12 left-1/2 -translate-x-1/2 text-[10px] font-mono text-cyan-500/80 bg-black/80 px-2 py-1 rounded border border-cyan-900/50 whitespace-nowrap">
+                {isScanning ? "MODE: OBJECT IDENTIFICATION" : "MODE: VIDEO FEED"}
+             </div>
           </div>
       )}
 

@@ -24,35 +24,39 @@ const Visualizer: React.FC<VisualizerProps> = ({ isActive }) => {
 
       ctx.clearRect(0, 0, width, height);
 
-      // Draw subtle grid
-      ctx.strokeStyle = 'rgba(14, 165, 233, 0.1)';
+      // Draw subtle sci-fi grid background
+      ctx.strokeStyle = 'rgba(14, 165, 233, 0.05)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for(let i=0; i<width; i+=40) {
+      // Vertical lines
+      for(let i = 0; i < width; i += 60) {
         ctx.moveTo(i, 0);
         ctx.lineTo(i, height);
       }
-      for(let i=0; i<height; i+=40) {
+      // Horizontal lines
+      for(let i = 0; i < height; i += 60) {
         ctx.moveTo(0, i);
         ctx.lineTo(width, i);
       }
       ctx.stroke();
 
       if (isActive) {
-        phaseRef.current += 0.1;
+        phaseRef.current += 0.08;
         
-        // Draw JARVIS-like oscillating circle
+        // Active State: JARVIS Energy Core
+        
+        // 1. Dynamic Wave Ring
         ctx.strokeStyle = '#22d3ee'; // cyan-400
         ctx.lineWidth = 3;
         ctx.beginPath();
-        
-        const baseRadius = 60;
-        const numPoints = 60;
+        const baseRadius = 70;
+        const numPoints = 80;
         
         for (let i = 0; i <= numPoints; i++) {
           const angle = (i / numPoints) * Math.PI * 2;
-          const noise = Math.sin(angle * 5 + phaseRef.current) * Math.cos(angle * 3 - phaseRef.current * 0.5) * 15;
-          const r = baseRadius + noise + Math.sin(phaseRef.current * 0.5) * 5;
+          // Create "voice" modulation effect
+          const noise = Math.sin(angle * 8 + phaseRef.current * 1.5) * Math.cos(angle * 4 - phaseRef.current) * 10;
+          const r = baseRadius + noise + Math.sin(phaseRef.current) * 5;
           
           const x = centerX + Math.cos(angle) * r;
           const y = centerY + Math.sin(angle) * r;
@@ -60,47 +64,58 @@ const Visualizer: React.FC<VisualizerProps> = ({ isActive }) => {
           if (i === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         }
-        
         ctx.closePath();
         ctx.stroke();
         
-        // Inner Glow
-        ctx.fillStyle = 'rgba(34, 211, 238, 0.1)';
+        // 2. Inner Glow Fill
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.05)';
         ctx.fill();
 
-        // Outer Ring
-        ctx.strokeStyle = 'rgba(14, 165, 233, 0.5)';
+        // 3. Orbital Data Rings
+        ctx.save();
+        ctx.translate(centerX, centerY);
+        ctx.rotate(phaseRef.current * 0.2);
+        ctx.strokeStyle = 'rgba(14, 165, 233, 0.4)';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.arc(centerX, centerY, baseRadius + 30 + Math.sin(phaseRef.current * 0.2) * 10, 0, Math.PI * 2);
+        ctx.arc(0, 0, baseRadius + 25, 0, Math.PI * 1.5);
         ctx.stroke();
+        ctx.restore();
 
-        // Particles
-        for(let i=0; i<4; i++) {
-           const angle = (Date.now() / 1000) + (i * Math.PI/2);
-           const r = baseRadius + 40;
-           const x = centerX + Math.cos(angle) * r;
-           const y = centerY + Math.sin(angle) * r;
-           
-           ctx.fillStyle = '#fff';
-           ctx.beginPath();
-           ctx.arc(x, y, 2, 0, Math.PI*2);
-           ctx.fill();
-        }
+        ctx.save();
+        ctx.translate(centerX, centerY);
+        ctx.rotate(-phaseRef.current * 0.3);
+        ctx.strokeStyle = 'rgba(14, 165, 233, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([10, 20]);
+        ctx.beginPath();
+        ctx.arc(0, 0, baseRadius + 45, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
 
       } else {
-        // Idle State - Pulsing Circle
-        const pulse = Math.sin(Date.now() / 1000) * 5;
-        ctx.strokeStyle = 'rgba(14, 165, 233, 0.3)';
+        // Idle State: Pulsing Reactor Mode
+        const pulse = Math.sin(Date.now() / 1500) * 4;
+        
+        // Inner Core
+        ctx.strokeStyle = 'rgba(14, 165, 233, 0.4)';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(centerX, centerY, 50 + pulse, 0, Math.PI * 2);
         ctx.stroke();
         
-        ctx.strokeStyle = 'rgba(14, 165, 233, 0.1)';
+        // Outer Core
+        ctx.strokeStyle = 'rgba(14, 165, 233, 0.15)';
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.arc(centerX, centerY, 70 - pulse, 0, Math.PI * 2);
+        ctx.arc(centerX, centerY, 65 - pulse, 0, Math.PI * 2);
         ctx.stroke();
+
+        // Central Dot
+        ctx.fillStyle = '#0ea5e9';
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, 3, 0, Math.PI * 2);
+        ctx.fill();
       }
 
       animationRef.current = requestAnimationFrame(draw);
