@@ -13,6 +13,8 @@ export enum SystemState {
   INITIALIZING = 'INITIALIZING'
 }
 
+export type Emotion = 'neutral' | 'alert' | 'success' | 'thinking' | 'uncertain';
+
 export interface SystemStat {
   label: string;
   value: number;

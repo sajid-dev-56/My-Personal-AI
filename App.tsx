@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { Mic, Send, Terminal, Cpu, Wifi, Activity, Power, Shield, Video, PhoneOff, Scan, Target } from 'lucide-react';
+import { Mic, Send, Terminal, Cpu, Wifi, Activity, Power, Shield, Video, PhoneOff, Scan, Target, Volume2, VolumeX, AlertCircle } from 'lucide-react';
 import { JARVIS_SYSTEM_INSTRUCTION } from './constants';
-import { Message, SystemState } from './types';
+import { Message, SystemState, Emotion } from './types';
 import Visualizer from './components/Visualizer';
 import SystemLog from './components/SystemLog';
 import { createPcmBlob, decodeAudioData, base64ToUint8Array } from './services/audioUtils';
@@ -16,9 +16,11 @@ const App: React.FC = () => {
   ]);
   const [inputText, setInputText] = useState('');
   const [systemState, setSystemState] = useState<SystemState>(SystemState.IDLE);
+  const [currentEmotion, setCurrentEmotion] = useState<Emotion>('neutral');
   const [isLiveMode, setIsLiveMode] = useState(false);
   const [isVideoMode, setIsVideoMode] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
 
   // Refs for Chat
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -29,6 +31,7 @@ const App: React.FC = () => {
   const outputContextRef = useRef<AudioContext | null>(null);
   const inputSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null); // Visualizer Analyser
   const nextStartTimeRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
   
@@ -42,6 +45,28 @@ const App: React.FC = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, systemState]);
 
+  // --- EMOTION DETECTION ---
+  // Simple heuristic to set visualizer color based on text content
+  const detectEmotion = (text: string) => {
+    const lower = text.toLowerCase();
+    if (lower.includes('access denied') || lower.includes('alert') || lower.includes('threat') || lower.includes('error') || lower.includes('warning')) {
+        setCurrentEmotion('alert');
+    } else if (lower.includes('success') || lower.includes('complete') || lower.includes('nominal') || lower.includes('online')) {
+        setCurrentEmotion('success');
+    } else if (lower.includes('calculating') || lower.includes('analyzing') || lower.includes('processing') || lower.includes('scanning')) {
+        setCurrentEmotion('thinking');
+    } else if (lower.includes('unsure') || lower.includes('unknown') || lower.includes('searching')) {
+        setCurrentEmotion('uncertain');
+    } else {
+        setCurrentEmotion('neutral');
+    }
+
+    // Reset to neutral after a few seconds if it was an event
+    if (['alert', 'success'].includes(currentEmotion)) {
+        setTimeout(() => setCurrentEmotion('neutral'), 3000);
+    }
+  };
+
   // --- TEXT CHAT HANDLER ---
   const handleSendMessage = async () => {
     if (!inputText.trim()) return;
@@ -50,6 +75,7 @@ const App: React.FC = () => {
     setMessages(prev => [...prev, userMsg]);
     setInputText('');
     setSystemState(SystemState.PROCESSING);
+    setCurrentEmotion('thinking');
 
     try {
       // Re-init client for text requests to ensure freshness
@@ -69,12 +95,14 @@ const App: React.FC = () => {
       });
 
       const text = response.text || "System error. Rerouting...";
+      detectEmotion(text);
       
       const modelMsg: Message = { role: 'model', content: text, timestamp: new Date() };
       setMessages(prev => [...prev, modelMsg]);
     } catch (error) {
       console.error(error);
       setMessages(prev => [...prev, { role: 'model', content: "Connection interrupted. Please retry.", timestamp: new Date() }]);
+      setCurrentEmotion('alert');
     } finally {
       setSystemState(SystemState.IDLE);
     }
@@ -123,23 +151,28 @@ const App: React.FC = () => {
       const inputCtx = new AudioContextClass({ sampleRate: 16000 });
       const outputCtx = new AudioContextClass({ sampleRate: 24000 });
       
+      // 2. Setup Analyser Node for Visualizer
+      const analyser = outputCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyserRef.current = analyser;
+      
       audioContextRef.current = inputCtx;
       outputContextRef.current = outputCtx;
 
-      // 2. Get Media Stream
+      // 3. Get Media Stream
       const stream = await navigator.mediaDevices.getUserMedia({ 
           audio: true,
           video: enableVideo ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'environment' } : false
       });
       streamRef.current = stream;
 
-      // 3. Setup Video Element if enabled
+      // 4. Setup Video Element if enabled
       if (enableVideo && videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(e => console.error("Video play failed", e));
       }
 
-      // 4. Connect to Gemini Live
+      // 5. Connect to Gemini Live
       // IMPORTANT: Create new instance here to avoid stale state/Network Errors
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
@@ -149,6 +182,7 @@ const App: React.FC = () => {
           onopen: () => {
             console.log('JARVIS Live Uplink Established');
             setSystemState(SystemState.LISTENING);
+            setCurrentEmotion('neutral');
             
             // Start processing audio from mic
             const source = inputCtx.createMediaStreamSource(stream);
@@ -178,6 +212,10 @@ const App: React.FC = () => {
             }
           },
           onmessage: async (msg: LiveServerMessage) => {
+             // Handle Text for Emotion Detection
+             // Note: Live API mostly sends audio, but sometimes sends text parts or tool calls
+             // We can primarily infer emotion from the fact that it is speaking
+             
              // Handle Audio Output
              const base64Audio = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
              if (base64Audio && outputCtx) {
@@ -189,7 +227,14 @@ const App: React.FC = () => {
                 
                 const source = outputCtx.createBufferSource();
                 source.buffer = audioBuffer;
-                source.connect(outputCtx.destination);
+                
+                // CONNECT TO ANALYSER FOR VISUALIZER
+                if (analyserRef.current) {
+                    source.connect(analyserRef.current);
+                    analyserRef.current.connect(outputCtx.destination);
+                } else {
+                    source.connect(outputCtx.destination);
+                }
                 
                 const currentTime = outputCtx.currentTime;
                 if (nextStartTimeRef.current < currentTime) {
@@ -220,7 +265,7 @@ const App: React.FC = () => {
           onerror: (err) => {
             console.error('JARVIS System Error', err);
             setSystemState(SystemState.IDLE);
-            // Don't auto-stop here to allow transient errors, but log it.
+            setCurrentEmotion('alert');
           }
         },
         config: {
@@ -238,6 +283,7 @@ const App: React.FC = () => {
     } catch (e) {
       console.error("Initialization Failed", e);
       setSystemState(SystemState.IDLE);
+      setCurrentEmotion('alert');
       alert("Error: Unable to establish uplink. Check network and permissions.");
       stopLiveSession();
     }
@@ -277,28 +323,42 @@ const App: React.FC = () => {
         }
         outputContextRef.current = null;
     }
+    
+    analyserRef.current = null;
 
     setIsLiveMode(false);
     setIsVideoMode(false);
     setIsScanning(false);
     setSystemState(SystemState.IDLE);
+    setCurrentEmotion('neutral');
     liveSessionRef.current = null;
   };
 
   const toggleScan = () => {
       setIsScanning(!isScanning);
-      // Optional: trigger a specific prompt to the model via data channel or just let the system instruction handle it
+      // Logic handled in Visualizer/Overlay, purely visual for now unless we send a text trigger
   };
+
+  const toggleMute = () => {
+      if (streamRef.current) {
+          const audioTracks = streamRef.current.getAudioTracks();
+          audioTracks.forEach(track => {
+              track.enabled = !isMuted; // Toggle based on previous state (inverted logic here is handled by state update)
+          });
+          setIsMuted(!isMuted);
+      }
+  };
+
 
   return (
     <div className="h-screen bg-slate-950 text-cyan-500 font-sans selection:bg-cyan-500/30 selection:text-cyan-200 overflow-hidden flex flex-col relative">
       
       {/* --- HUD HEADER --- */}
-      <header className="h-16 shrink-0 border-b border-cyan-900/50 bg-slate-950/80 backdrop-blur-md flex items-center justify-between px-6 z-20 shadow-[0_0_20px_rgba(8,145,178,0.2)]">
+      <header className={`h-16 shrink-0 border-b border-cyan-900/50 bg-slate-950/80 backdrop-blur-md flex items-center justify-between px-6 z-20 shadow-[0_0_20px_rgba(8,145,178,0.2)] transition-colors duration-500 ${currentEmotion === 'alert' ? 'border-red-900/50 shadow-red-900/20' : ''}`}>
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full border-2 border-cyan-400 flex items-center justify-center relative">
-             <div className="absolute w-full h-full rounded-full border border-cyan-400 animate-ping opacity-20"></div>
-             <Cpu size={20} className="text-cyan-400" />
+          <div className={`w-10 h-10 rounded-full border-2 flex items-center justify-center relative transition-colors duration-500 ${currentEmotion === 'alert' ? 'border-red-500' : 'border-cyan-400'}`}>
+             <div className={`absolute w-full h-full rounded-full border animate-ping opacity-20 ${currentEmotion === 'alert' ? 'border-red-500' : 'border-cyan-400'}`}></div>
+             <Cpu size={20} className={`transition-colors duration-500 ${currentEmotion === 'alert' ? 'text-red-400' : 'text-cyan-400'}`} />
           </div>
           <div>
             <h1 className="text-xl font-bold tracking-widest text-cyan-100 font-mono">J.A.R.V.I.S.</h1>
@@ -313,8 +373,8 @@ const App: React.FC = () => {
                  <span>{isLiveMode ? "UPLINK: SECURE" : "UPLINK: STANDBY"}</span>
               </div>
               <div className="flex items-center gap-1">
-                 <Activity size={14} />
-                 <span>CPU: {Math.floor(Math.random() * 20) + 10}%</span>
+                 <Activity size={14} className={currentEmotion === 'alert' ? 'text-red-500 animate-pulse' : ''} />
+                 <span>STATUS: {currentEmotion.toUpperCase()}</span>
               </div>
               <div className="flex items-center gap-1">
                  <Shield size={14} />
@@ -361,7 +421,7 @@ const App: React.FC = () => {
                  {isVideoMode ? (
                     <div className="relative w-full h-full flex items-center justify-center p-4">
                        {/* Video HUD Container */}
-                       <div className={`relative border-2 ${isScanning ? 'border-red-400 shadow-[0_0_50px_rgba(248,113,113,0.4)]' : 'border-cyan-500/50 shadow-[0_0_50px_rgba(6,182,212,0.3)]'} rounded-lg overflow-hidden bg-black/50 backdrop-blur-sm max-w-5xl w-full aspect-video transition-all duration-500`}>
+                       <div className={`relative border-2 ${isScanning || currentEmotion === 'alert' ? 'border-red-400 shadow-[0_0_50px_rgba(248,113,113,0.4)]' : 'border-cyan-500/50 shadow-[0_0_50px_rgba(6,182,212,0.3)]'} rounded-lg overflow-hidden bg-black/50 backdrop-blur-sm max-w-5xl w-full aspect-video transition-all duration-500`}>
                           <video 
                              ref={videoRef} 
                              className="w-full h-full object-cover transform scale-x-[-1]" 
@@ -414,7 +474,11 @@ const App: React.FC = () => {
                        </div>
                     </div>
                  ) : (
-                    <Visualizer isActive={isLiveMode && (systemState === SystemState.SPEAKING || systemState === SystemState.LISTENING)} />
+                    <Visualizer 
+                        isActive={isLiveMode && (systemState === SystemState.SPEAKING || systemState === SystemState.LISTENING)} 
+                        analyser={analyserRef.current}
+                        emotion={currentEmotion}
+                    />
                  )}
             </div>
 
@@ -427,6 +491,7 @@ const App: React.FC = () => {
                         ? 'bg-cyan-900/20 border-cyan-800 text-cyan-100 rounded-br-none ml-12' 
                         : 'bg-slate-900/60 border-cyan-500/40 text-cyan-300 rounded-bl-none mr-12'
                       }
+                      ${currentEmotion === 'alert' && msg.role === 'model' ? 'border-red-500/50 text-red-100' : ''}
                     `}>
                         <div className="flex items-center gap-2 mb-2 border-b border-cyan-500/20 pb-1">
                             <span className="text-[10px] font-mono opacity-60 uppercase tracking-widest">
@@ -496,17 +561,17 @@ const App: React.FC = () => {
 
       {/* Decorative Background */}
       <div className="absolute inset-0 pointer-events-none z-0">
-         <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-cyan-500/5 rounded-full blur-3xl"></div>
-         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-600/5 rounded-full blur-3xl"></div>
+         <div className={`absolute top-1/4 left-1/4 w-96 h-96 rounded-full blur-3xl transition-colors duration-1000 ${currentEmotion === 'alert' ? 'bg-red-500/5' : 'bg-cyan-500/5'}`}></div>
+         <div className={`absolute bottom-1/4 right-1/4 w-96 h-96 rounded-full blur-3xl transition-colors duration-1000 ${currentEmotion === 'alert' ? 'bg-red-600/5' : 'bg-blue-600/5'}`}></div>
       </div>
       
       {/* Central HUD Ring (Audio Only Mode) */}
       {isLiveMode && !isVideoMode && (
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-30">
-           <div className="w-[300px] h-[300px] border border-cyan-500/20 rounded-full animate-spin-slow absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2"></div>
-           <div className="w-[280px] h-[280px] border border-cyan-400/10 rounded-full animate-spin-reverse absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2"></div>
-           <div className="text-center mt-48">
-              <div className="text-cyan-400 font-mono text-sm tracking-[0.2em] animate-pulse">
+           <div className={`w-[340px] h-[340px] border rounded-full animate-spin-slow absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 transition-colors duration-500 ${currentEmotion === 'alert' ? 'border-red-500/20' : 'border-cyan-500/20'}`}></div>
+           <div className={`w-[300px] h-[300px] border rounded-full animate-spin-reverse absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 transition-colors duration-500 ${currentEmotion === 'alert' ? 'border-red-400/10' : 'border-cyan-400/10'}`}></div>
+           <div className="text-center mt-60">
+              <div className={`font-mono text-sm tracking-[0.2em] animate-pulse transition-colors duration-500 ${currentEmotion === 'alert' ? 'text-red-400' : 'text-cyan-400'}`}>
                 {systemState === SystemState.LISTENING ? "LISTENING..." : 
                  systemState === SystemState.SPEAKING ? "VOCALIZING..." : 
                  "STANDBY"}
@@ -524,6 +589,13 @@ const App: React.FC = () => {
                 title="Identify Object"
              >
                 <Scan size={24} className={isScanning ? "animate-spin-slow" : ""} />
+             </button>
+
+             <button 
+                onClick={toggleMute}
+                className={`p-3 rounded-full border transition-all ${isMuted ? 'bg-red-500/20 text-red-400 border-red-500' : 'bg-cyan-500/10 text-cyan-400 border-cyan-500/50 hover:bg-cyan-500/30'}`}
+             >
+                {isMuted ? <VolumeX size={24} /> : <Volume2 size={24} />}
              </button>
              
              <div className="h-6 w-px bg-cyan-500/30 mx-2"></div>
