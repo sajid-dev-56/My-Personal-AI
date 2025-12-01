@@ -1,0 +1,8 @@
+{
+  "name": "JARVIS Interface",
+  "description": "An advanced, voice-enabled AI assistant interface simulating the JARVIS operating system using Gemini models.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
